@@ -3,14 +3,6 @@
 Lightweight file transfer toolkit for pentesting and CTF environments.
 Designed for fast, flexible file delivery and exfiltration across Linux and Windows targets.
 
-
-## Features
-- File delivery (drop / dropw)
-- File exfiltration (grab / grabw)
-- Supports HTTP, fileless, raw TCP (netcat), and offline methods
-- Automatic IP detection (tun0 / routing fallback)
-- Copy-paste ready one-liners (clipboard support)
-
 ## Tools
 | Tool  | Description |
 | ------------- | ------------- |
@@ -18,6 +10,30 @@ Designed for fast, flexible file delivery and exfiltration across Linux and Wind
 | grab  | Linux file exfiltration  |
 | dropw  | Windows file delivery  |
 | grabw  | Windows file exfiltration  |
+
+
+## How to use
+### Drop file (Linux target)
+```bash
+drop <file> [http|fileless|bash|encrypted|offline] [port]
+```
+
+Grab file (Linux target)
+```bash
+grab <outfile> [nc|http|offline] [port]
+```
+
+
+Drop file (Windows target)
+```bash
+dropw <file> [http|fileless|offline] [port]
+```
+
+
+Grab file (Windows target)
+```bash
+grabw <outfile> [nc|http|smb|offline] [port]
+```
 
 ## Requirements
 - Linux attacker machine
